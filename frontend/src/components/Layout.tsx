@@ -4,7 +4,7 @@ import {
   ShoppingCartOutlined, LogoutOutlined, GoldOutlined,
 } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { useAuthStore } from '../stores/auth'
+import { useAuthStore, ROLE_LABEL } from '../stores/auth'
 
 const { Sider, Header, Content } = AntLayout
 const { Title, Text } = Typography
@@ -48,7 +48,7 @@ export default function Layout() {
         >
           <Text strong style={{ fontSize: 16 }}>发电厂燃料采购管理系统</Text>
           <Space>
-            <Text type="secondary">{username} ({role})</Text>
+            <Text type="secondary">{username} · {role ? ROLE_LABEL[role] || role : ''}</Text>
             <Button type="text" icon={<LogoutOutlined />} onClick={() => { logout(); navigate('/login') }}>
               退出
             </Button>

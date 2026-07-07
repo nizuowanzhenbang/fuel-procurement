@@ -11,25 +11,40 @@ from app.models.user import User, UserRole
 from app.models.supplier import Supplier
 from app.models.contract import FuelContract
 from app.models.order import PurchaseOrder
-from app.api import auth, suppliers, contracts, orders, dashboard
+from app.models.contract_approval import ContractApproval
+from app.models.contract_price_history import ContractPriceHistory
+from app.models.supplier_quality_score import SupplierQualityScore
+from app.api import auth, suppliers, contracts, orders, dashboard, webhooks, integration
 from app.api.deps import hash_password
 
-_ = (User, Supplier, FuelContract, PurchaseOrder)
+_ = (
+    User, Supplier, FuelContract, PurchaseOrder,
+    ContractApproval, ContractPriceHistory, SupplierQualityScore,
+)
 
 
-def _create_default_admin(db) -> None:
-    if db.query(User).filter(User.username == "admin").first():
-        return
-    admin = User(
-        username="admin",
-        hashed_password=hash_password("admin123"),
-        role=UserRole.ADMIN,
-        is_active=True,
-        created_at=datetime.utcnow(),
-    )
-    db.add(admin)
-    db.commit()
-    print("[启动] 默认管理员账户已创建：admin / admin123")
+def _create_default_users(db) -> None:
+    defaults = [
+        ("admin",    "admin123",    UserRole.ADMIN),
+        ("buyer",    "buyer123",    UserRole.PROCUREMENT),
+        ("approver", "approver123", UserRole.APPROVER),
+        ("viewer",   "viewer123",   UserRole.VIEWER),
+    ]
+    created = []
+    for username, pwd, role in defaults:
+        if db.query(User).filter(User.username == username).first():
+            continue
+        db.add(User(
+            username=username,
+            hashed_password=hash_password(pwd),
+            role=role,
+            is_active=True,
+            created_at=datetime.utcnow(),
+        ))
+        created.append(username)
+    if created:
+        db.commit()
+        print(f"[启动] 已创建默认账户：{', '.join(created)}")
 
 
 @asynccontextmanager
@@ -37,7 +52,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        _create_default_admin(db)
+        _create_default_users(db)
     finally:
         db.close()
     print(f"[启动] {settings.APP_NAME} v{settings.APP_VERSION} 已就绪")
@@ -69,6 +84,8 @@ app.include_router(suppliers.router)
 app.include_router(contracts.router)
 app.include_router(orders.router)
 app.include_router(dashboard.router)
+app.include_router(webhooks.router)
+app.include_router(integration.router)
 
 
 @app.get("/health", tags=["系统"])

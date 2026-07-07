@@ -57,8 +57,12 @@ export default function LoginPage() {
               登录
             </Button>
           </Form.Item>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            默认账户：admin / admin123
+          <Text type="secondary" style={{ fontSize: 12, display: 'block', lineHeight: 1.8 }}>
+            默认账户：<br />
+            admin / admin123（管理员）<br />
+            buyer / buyer123（采购员）<br />
+            approver / approver123（审批人）<br />
+            viewer / viewer123（查看者）
           </Text>
         </Form>
       </Card>

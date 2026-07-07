@@ -136,3 +136,86 @@ export interface CoalTypeShareItem {
   coal_type: string
   quantity: number
 }
+
+// === v2 集成 / 多级审批 / 价格历史 / 质量评分 ===
+
+export type UserRole = 'ADMIN' | 'PROCUREMENT' | 'APPROVER' | 'VIEWER'
+
+export interface QualityScore {
+  score: number
+  sample_count: number | null
+  pass_rate: number | null
+  evaluated_at: string
+  source: 'synced' | 'live'
+}
+
+export interface SupplierDetail extends Supplier {
+  quality_score: QualityScore | null
+}
+
+export type ApprovalLevelStatus = 'PENDING' | 'APPROVED' | 'REJECTED'
+
+export interface ApprovalLevel {
+  id: number
+  level: number
+  level_name: string
+  status: ApprovalLevelStatus
+  approver: string | null
+  approved_at: string | null
+  notes: string | null
+  created_at: string
+}
+
+export interface PriceHistoryItem {
+  id: number
+  old_price: number
+  new_price: number
+  changed_by: string
+  reason: string | null
+  created_at: string
+}
+
+export interface ContractDetail extends Contract {
+  approvals: ApprovalLevel[]
+  price_history: PriceHistoryItem[]
+}
+
+export interface QualityResult {
+  sample_no?: string
+  sampled_at?: string
+  calorific_value?: number | null
+  ash?: number | null
+  sulfur?: number | null
+  moisture?: number | null
+  conclusion?: string | null
+  [key: string]: unknown
+}
+
+export interface OrderDetail extends Order {
+  quality_results: QualityResult[] | null
+}
+
+export interface SupplierQualityRank {
+  rank: number
+  supplier_name: string
+  score: number
+  sample_count: number | null
+  pass_rate: number | null
+  evaluated_at: string
+  tier: string | null
+  credit_score: number | null
+}
+
+export interface ExpiringContract {
+  id: number
+  contract_no: string
+  supplier_name: string | null
+  coal_type: string
+  expiry_date: string
+  days_left: number
+  contract_quantity: number
+  delivered_quantity: number
+  remaining_quantity: number
+  completion_rate: number
+  unit_price: number
+}

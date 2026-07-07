@@ -1,12 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Card, Table, Tag, Button, Space, Modal, Form, Input, Select,
-  message, Descriptions, Row, Col, InputNumber, Progress,
+  message, Descriptions, Row, Col, InputNumber, Progress, Statistic, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { PlusOutlined, ReloadOutlined, EyeOutlined } from '@ant-design/icons'
+import {
+  PlusOutlined, ReloadOutlined, EyeOutlined,
+  DownloadOutlined, TrophyOutlined,
+} from '@ant-design/icons'
+import dayjs from 'dayjs'
 import { supplierApi } from '../api'
-import type { Supplier, SupplierStatus, SupplierTier } from '../types'
+import type { Supplier, SupplierDetail, SupplierStatus, SupplierTier } from '../types'
+import { useAuthStore, canWrite, canApprove } from '../stores/auth'
 
 const STATUS_LABEL: Record<SupplierStatus, { label: string; color: string }> = {
   PENDING_REVIEW: { label: '待审核', color: 'warning' },
@@ -24,6 +29,10 @@ const TIER_LABEL: Record<SupplierTier, { label: string; color: string }> = {
 }
 
 export default function SupplierList() {
+  const role = useAuthStore((s) => s.role)
+  const writable = canWrite(role)
+  const approvable = canApprove(role)
+
   const [data, setData] = useState<Supplier[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -31,10 +40,31 @@ export default function SupplierList() {
   const [loading, setLoading] = useState(false)
   const [filters, setFilters] = useState<{ status?: SupplierStatus; tier?: SupplierTier; keyword?: string }>({})
   const [createOpen, setCreateOpen] = useState(false)
-  const [detail, setDetail] = useState<Supplier | null>(null)
+  const [detail, setDetail] = useState<SupplierDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [form] = Form.useForm()
   const [reviewForm] = Form.useForm()
+
+  const openDetail = async (row: Supplier) => {
+    setDetailLoading(true)
+    try {
+      const res = await supplierApi.get(row.id)
+      setDetail(res.data)
+    } catch {
+      message.error('详情加载失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const handleExport = async () => {
+    try {
+      await supplierApi.exportCsv(filters)
+    } catch (e: unknown) {
+      message.error((e as Error)?.message || '导出失败')
+    }
+  }
 
   const load = useCallback(async (p = page, ps = pageSize, f = filters) => {
     setLoading(true)
@@ -102,7 +132,7 @@ export default function SupplierList() {
     },
     {
       title: '操作', width: 70,
-      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => setDetail(r)} />,
+      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => openDetail(r)} />,
     },
   ]
 
@@ -111,9 +141,18 @@ export default function SupplierList() {
       <Card>
         <Row gutter={12} style={{ marginBottom: 16 }}>
           <Col>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-              登记供应商
-            </Button>
+            <Space>
+              <Tooltip title={writable ? '' : '当前角色无登记权限'}>
+                <Button
+                  type="primary" icon={<PlusOutlined />}
+                  disabled={!writable}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  登记供应商
+                </Button>
+              </Tooltip>
+              <Button icon={<DownloadOutlined />} onClick={handleExport}>CSV 导出</Button>
+            </Space>
           </Col>
           <Col flex="auto">
             <Space wrap>
@@ -230,20 +269,21 @@ export default function SupplierList() {
         title={detail ? `供应商详情 - ${detail.code}` : ''}
         open={!!detail}
         onCancel={() => setDetail(null)}
-        width={760}
+        width={780}
+        confirmLoading={detailLoading}
         footer={detail ? (
           <Space>
-            {detail.status === 'PENDING_REVIEW' && (
+            {detail.status === 'PENDING_REVIEW' && approvable && (
               <Button type="primary" onClick={() => setReviewOpen(true)}>准入审核</Button>
             )}
-            {detail.status === 'ACTIVE' && (
+            {detail.status === 'ACTIVE' && approvable && (
               <Button danger onClick={async () => {
                 await supplierApi.suspend(detail.id)
                 message.success('已暂停')
                 setDetail(null); load()
               }}>暂停合作</Button>
             )}
-            {detail.status === 'SUSPENDED' && (
+            {detail.status === 'SUSPENDED' && approvable && (
               <Button type="primary" onClick={async () => {
                 await supplierApi.resume(detail.id)
                 message.success('已恢复')
@@ -280,6 +320,45 @@ export default function SupplierList() {
               </Descriptions.Item>
             )}
           </Descriptions>
+        )}
+        {detail && (
+          <Card
+            size="small"
+            style={{ marginTop: 16 }}
+            title={
+              <span>
+                <TrophyOutlined style={{ color: '#fa8c16', marginRight: 6 }} />
+                煤质化验综合评分
+                {detail.quality_score && (
+                  <Tag color={detail.quality_score.source === 'synced' ? 'blue' : 'green'} style={{ marginLeft: 8 }}>
+                    {detail.quality_score.source === 'synced' ? 'webhook 同步' : '实时拉取'}
+                  </Tag>
+                )}
+              </span>
+            }
+          >
+            {detail.quality_score ? (
+              <Row gutter={16}>
+                <Col span={6}>
+                  <Statistic title="综合评分" value={detail.quality_score.score} precision={1} suffix="/ 100"
+                    valueStyle={{ color: detail.quality_score.score >= 90 ? '#52c41a' : detail.quality_score.score >= 80 ? '#1677ff' : '#faad14' }} />
+                </Col>
+                <Col span={6}>
+                  <Statistic title="合格率" value={detail.quality_score.pass_rate ?? 0} suffix="%" />
+                </Col>
+                <Col span={6}>
+                  <Statistic title="样本数" value={detail.quality_score.sample_count ?? 0} />
+                </Col>
+                <Col span={6}>
+                  <Statistic title="评估时间" value={dayjs(detail.quality_score.evaluated_at).format('YYYY-MM-DD')} />
+                </Col>
+              </Row>
+            ) : (
+              <div style={{ color: '#999', textAlign: 'center', padding: 12 }}>
+                未对接煤质系统或暂无评分数据
+              </div>
+            )}
+          </Card>
         )}
       </Modal>
 

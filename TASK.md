@@ -24,32 +24,54 @@
 - [x] CLAUDE.md
 - [x] TASK.md
 
-## v2.0（规划）
+## v2.0（已完成）
 
 ### 与 coal-quality-monitor 集成
-- [ ] 配置 `QUALITY_SYSTEM_URL`，供应商详情拉取煤质系统信用分
-- [ ] 煤质系统的供应商打分变化 webhook 推送过来
-- [ ] Dashboard 增加"供应商质量综合评分排名"
+- [x] 配置 `QUALITY_SYSTEM_URL`，供应商详情通过 `utils/quality_client` 拉取煤质系统信用分（失败降级 None）
+- [x] Webhook `POST /api/webhook/quality-score`（带 `X-Integration-Token` 校验），落库 `supplier_quality_scores`
+- [x] Dashboard 新增 `/dashboard/supplier-quality-ranking`（取每家最新评分排序）
 
 ### 业务扩展
-- [ ] 招标比价模块（多供应商对同一需求报价）
-- [ ] 长协合同到期前 30 天提醒
-- [ ] 合同多级审批（金额阈值触发不同审批级别）
-- [ ] 单价历史变更追踪（合同单价调整审计）
-- [ ] 发票管理 + 应付账款
+- [x] 合同多级审批：金额阈值触发不同级别（&lt;100 万 1 级 / 100-500 万 2 级 / &gt;500 万 3 级）
+  - 新增 `contract_approvals` 表，`/contracts/{id}/submit` 自动建链
+  - `/contracts/{id}/approve` 推进当前级，最后一级通过 → ACTIVE；拒绝 → 退回 DRAFT
+  - 前端详情用 Steps 展示审批流
+- [x] 长协合同到期前 30 天提醒：`/dashboard/expiring-contracts`，前端 Dashboard 加预警卡片
+- [x] 单价历史变更追踪：`contract_price_history` 表
+  - 草稿期 `PUT /contracts/{id}` 改价自动写入
+  - 生效合同新增 `POST /contracts/{id}/adjust-price`（审批人权限）
+  - 详情页展示最近 3 条 + 抽屉查看全部
 
 ### 体验
-- [ ] CSV 导出
-- [ ] 角色权限拦截（采购员/审批人/查看者）
-- [ ] 订单详情显示煤质化验结果（如已对接）
+- [x] CSV 导出：供应商 / 合同 / 订单三个列表 `/{...}/export?...` 同 list 筛选参数，UTF-8 BOM 防乱码
+- [x] 角色权限拦截：ADMIN / PROCUREMENT / APPROVER / VIEWER
+  - `deps.require_write`：管理员或采购员（创建/修改/到货/取消）
+  - `deps.require_approver`：管理员或审批人（审批/调价/结算/暂停恢复/供应商审核）
+  - seed 增加 buyer/approver/viewer 三个账户
+  - 前端通过 `canWrite`/`canApprove` 禁用按钮 + tooltip 提示
+- [x] 订单详情显示煤质化验结果：`/orders/{id}` 聚合调用煤质系统 `/api/integration/order-quality`
+
+## v2.1（已完成，2026-05-20）
+
+### 与 coal-yard-management 上游集成
+- [x] 新增 `app/api/integration.py`（统一鉴权 header `X-Integration-Token` + `settings.INTEGRATION_SECRET`）
+- [x] `GET /api/integration/order-info?order_no=` 返回订单履约信息（含合同、供应商、煤种、煤质基准）
+- [x] `POST /api/integration/yard-stocked` 接收煤场入场通知，自动累计 `delivered_quantity` + 推进订单/合同状态机
+- [x] `config.py` 新增 `INTEGRATION_SECRET`（默认与煤场/煤质共享 `coal-integration-shared-secret`）
 
 ## v3.0（规划）
 
+- [ ] 招标比价模块（多供应商对同一需求报价）
+- [ ] 发票管理 + 应付账款
 - [ ] 移动端：现场到货扫码登记
 - [ ] AI 辅助：根据历史价格预测下月最优采购量
 - [ ] 与 ERP / 财务系统对接
+- [ ] WebSocket 实时通知（合同审批/到货/到期）
+- [ ] 黑名单状态机（SupplierStatus.BLACKLISTED 操作 API）
 
-## 已知问题
+## 已知简化（v2 仍存在）
 
-- 合同审批只有"审批人"姓名字段，未关联用户表（v2 加）
-- 订单结算金额支持手动覆盖（避免单价×数量算错的特殊情况），但未做差异审计
+- 合同审批人字段为字符串，未关联 users 表（多级审批的 approver 同样如此）
+- 订单结算金额支持手动覆盖，未做差异审计
+- 没有 WebSocket（采购场景实时性要求不高）
+- `coal-quality-monitor` 的对端 `/api/integration/supplier-credit` 和 `/order-quality` 接口约定，需对方在 v2 配套实现

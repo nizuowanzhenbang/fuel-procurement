@@ -2,12 +2,20 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   Card, Table, Tag, Button, Space, Modal, Form, Input, Select,
   DatePicker, message, Descriptions, Row, Col, InputNumber, Progress,
+  Steps, Drawer, Empty, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { PlusOutlined, ReloadOutlined, EyeOutlined } from '@ant-design/icons'
+import {
+  PlusOutlined, ReloadOutlined, EyeOutlined,
+  DownloadOutlined, HistoryOutlined, DollarOutlined,
+} from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { contractApi, supplierApi } from '../api'
-import type { Contract, ContractStatus, ContractType, PricingMode, Supplier } from '../types'
+import type {
+  Contract, ContractDetail, ContractStatus, ContractType, PricingMode,
+  Supplier, ApprovalLevel, PriceHistoryItem,
+} from '../types'
+import { useAuthStore, canWrite, canApprove } from '../stores/auth'
 
 const STATUS_LABEL: Record<ContractStatus, { label: string; color: string }> = {
   DRAFT: { label: '草稿', color: 'default' },
@@ -26,7 +34,17 @@ const PRICING_LABEL: Record<PricingMode, string> = {
   DELIVERED: '到厂价', EX_MINE: '坑口价', FOB: '车板价', CIF: '到港价',
 }
 
+function approvalStepStatus(s: ApprovalLevel['status']): 'wait' | 'process' | 'finish' | 'error' {
+  if (s === 'PENDING') return 'process'
+  if (s === 'APPROVED') return 'finish'
+  return 'error'
+}
+
 export default function ContractList() {
+  const role = useAuthStore((s) => s.role)
+  const writable = canWrite(role)
+  const approvable = canApprove(role)
+
   const [data, setData] = useState<Contract[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -34,11 +52,16 @@ export default function ContractList() {
   const [loading, setLoading] = useState(false)
   const [filters, setFilters] = useState<{ status?: ContractStatus; keyword?: string }>({})
   const [createOpen, setCreateOpen] = useState(false)
-  const [detail, setDetail] = useState<Contract | null>(null)
+  const [detail, setDetail] = useState<ContractDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [approveOpen, setApproveOpen] = useState(false)
+  const [priceOpen, setPriceOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [history, setHistory] = useState<PriceHistoryItem[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [form] = Form.useForm()
   const [approveForm] = Form.useForm()
+  const [priceForm] = Form.useForm()
 
   const load = useCallback(async (p = page, ps = pageSize, f = filters) => {
     setLoading(true)
@@ -57,6 +80,24 @@ export default function ContractList() {
     load(1, 20, {})
     supplierApi.list({ page: 1, page_size: 100, status: 'ACTIVE' }).then((r) => setSuppliers(r.data.items))
   }, [])
+
+  const openDetail = async (row: Contract) => {
+    setDetailLoading(true)
+    try {
+      const res = await contractApi.get(row.id)
+      setDetail(res.data)
+    } catch {
+      message.error('详情加载失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const refreshDetail = async () => {
+    if (!detail) return
+    const res = await contractApi.get(detail.id)
+    setDetail(res.data)
+  }
 
   const handleCreate = async (values: {
     effective_date: dayjs.Dayjs; expiry_date: dayjs.Dayjs;
@@ -80,11 +121,37 @@ export default function ContractList() {
   const handleApprove = async (values: { approver: string; approved: boolean; notes?: string }) => {
     if (!detail) return
     try {
-      await contractApi.approve(detail.id, values.approver, values.approved, values.notes)
-      message.success(values.approved ? '审批通过' : '已退回草稿')
-      setApproveOpen(false); approveForm.resetFields(); setDetail(null); load()
+      const res = await contractApi.approve(detail.id, values.approver, values.approved, values.notes)
+      message.success(res.message || (values.approved ? '审批通过' : '已退回草稿'))
+      setApproveOpen(false); approveForm.resetFields(); refreshDetail(); load()
     } catch (e: unknown) {
       message.error((e as { detail?: string })?.detail || '操作失败')
+    }
+  }
+
+  const handleAdjustPrice = async (values: { new_price: number; reason?: string }) => {
+    if (!detail) return
+    try {
+      await contractApi.adjustPrice(detail.id, values.new_price, values.reason)
+      message.success('价格已调整，审计已入历史')
+      setPriceOpen(false); priceForm.resetFields(); refreshDetail(); load()
+    } catch (e: unknown) {
+      message.error((e as { detail?: string })?.detail || '操作失败')
+    }
+  }
+
+  const openHistory = async () => {
+    if (!detail) return
+    const res = await contractApi.priceHistory(detail.id)
+    setHistory(res.data)
+    setHistoryOpen(true)
+  }
+
+  const handleExport = async () => {
+    try {
+      await contractApi.exportCsv(filters)
+    } catch (e: unknown) {
+      message.error((e as Error)?.message || '导出失败')
     }
   }
 
@@ -118,7 +185,7 @@ export default function ContractList() {
     },
     {
       title: '操作', width: 70,
-      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => setDetail(r)} />,
+      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => openDetail(r)} />,
     },
   ]
 
@@ -127,9 +194,18 @@ export default function ContractList() {
       <Card>
         <Row gutter={12} style={{ marginBottom: 16 }}>
           <Col>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-              新建合同
-            </Button>
+            <Space>
+              <Tooltip title={writable ? '' : '当前角色无创建权限'}>
+                <Button
+                  type="primary" icon={<PlusOutlined />}
+                  disabled={!writable}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  新建合同
+                </Button>
+              </Tooltip>
+              <Button icon={<DownloadOutlined />} onClick={handleExport}>CSV 导出</Button>
+            </Space>
           </Col>
           <Col flex="auto">
             <Space wrap>
@@ -219,7 +295,9 @@ export default function ContractList() {
               </Form.Item>
             </Col>
           </Row>
-          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>煤质基准（验收依据）：</div>
+          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>
+            煤质基准（验收依据）；金额阈值自动触发：&lt;100 万 1 级 / 100-500 万 2 级 / &gt;500 万 3 级
+          </div>
           <Row gutter={12}>
             <Col span={6}>
               <Form.Item name="spec_calorific_value" label="基准热值 kcal/kg">
@@ -253,75 +331,133 @@ export default function ContractList() {
         title={detail ? `合同详情 - ${detail.contract_no}` : ''}
         open={!!detail}
         onCancel={() => setDetail(null)}
-        width={820}
+        width={900}
+        confirmLoading={detailLoading}
         footer={detail ? (
-          <Space>
-            {detail.status === 'DRAFT' && (
+          <Space wrap>
+            {detail.status === 'DRAFT' && writable && (
               <Button type="primary" onClick={async () => {
-                await contractApi.submit(detail.id)
-                message.success('已提交审批')
-                setDetail(null); load()
+                const res = await contractApi.submit(detail.id)
+                message.success(res.message || '已提交审批')
+                refreshDetail(); load()
               }}>提交审批</Button>
             )}
-            {detail.status === 'PENDING_APPROVAL' && (
+            {detail.status === 'PENDING_APPROVAL' && approvable && (
               <Button type="primary" onClick={() => setApproveOpen(true)}>审批</Button>
             )}
-            {detail.status === 'ACTIVE' && (
-              <Button danger onClick={async () => {
-                Modal.confirm({
-                  title: '确认解除合同？',
-                  onOk: async () => {
-                    await contractApi.terminate(detail.id)
-                    message.success('已解除')
-                    setDetail(null); load()
-                  },
-                })
-              }}>解除合同</Button>
+            {detail.status === 'ACTIVE' && approvable && (
+              <>
+                <Button icon={<DollarOutlined />} onClick={() => setPriceOpen(true)}>调整单价</Button>
+                <Button danger onClick={async () => {
+                  Modal.confirm({
+                    title: '确认解除合同？',
+                    onOk: async () => {
+                      await contractApi.terminate(detail.id)
+                      message.success('已解除')
+                      setDetail(null); load()
+                    },
+                  })
+                }}>解除合同</Button>
+              </>
             )}
+            <Button icon={<HistoryOutlined />} onClick={openHistory}>单价变更历史</Button>
             <Button onClick={() => setDetail(null)}>关闭</Button>
           </Space>
         ) : null}
       >
         {detail && (
-          <Descriptions column={2} bordered size="small">
-            <Descriptions.Item label="合同编号">{detail.contract_no}</Descriptions.Item>
-            <Descriptions.Item label="状态">
-              <Tag color={STATUS_LABEL[detail.status].color}>{STATUS_LABEL[detail.status].label}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="供应商" span={2}>{detail.supplier_name}</Descriptions.Item>
-            <Descriptions.Item label="类型">{TYPE_LABEL[detail.contract_type]}</Descriptions.Item>
-            <Descriptions.Item label="计价方式">{PRICING_LABEL[detail.pricing_mode]}</Descriptions.Item>
-            <Descriptions.Item label="煤种">{detail.coal_type}</Descriptions.Item>
-            <Descriptions.Item label="产地">{detail.coal_origin || '-'}</Descriptions.Item>
-            <Descriptions.Item label="合同量">{detail.contract_quantity.toLocaleString()} 吨</Descriptions.Item>
-            <Descriptions.Item label="累计交付">{detail.delivered_quantity.toLocaleString()} 吨</Descriptions.Item>
-            <Descriptions.Item label="单价">{detail.unit_price} 元/吨</Descriptions.Item>
-            <Descriptions.Item label="总金额">{detail.total_amount} 万元</Descriptions.Item>
-            <Descriptions.Item label="生效日期">{dayjs(detail.effective_date).format('YYYY-MM-DD')}</Descriptions.Item>
-            <Descriptions.Item label="到期日期">{dayjs(detail.expiry_date).format('YYYY-MM-DD')}</Descriptions.Item>
-            <Descriptions.Item label="基准热值">{detail.spec_calorific_value || '-'} kcal/kg</Descriptions.Item>
-            <Descriptions.Item label="灰分上限">{detail.spec_ash_max != null ? `${detail.spec_ash_max}%` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="硫分上限">{detail.spec_sulfur_max != null ? `${detail.spec_sulfur_max}%` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="水分上限">{detail.spec_moisture_max != null ? `${detail.spec_moisture_max}%` : '-'}</Descriptions.Item>
-            {detail.approved_by && (
-              <Descriptions.Item label="审批" span={2}>
-                {detail.approved_by} 于 {dayjs(detail.approved_at).format('YYYY-MM-DD HH:mm')}
+          <>
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="合同编号">{detail.contract_no}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={STATUS_LABEL[detail.status].color}>{STATUS_LABEL[detail.status].label}</Tag>
               </Descriptions.Item>
+              <Descriptions.Item label="供应商" span={2}>{detail.supplier_name}</Descriptions.Item>
+              <Descriptions.Item label="类型">{TYPE_LABEL[detail.contract_type]}</Descriptions.Item>
+              <Descriptions.Item label="计价方式">{PRICING_LABEL[detail.pricing_mode]}</Descriptions.Item>
+              <Descriptions.Item label="煤种">{detail.coal_type}</Descriptions.Item>
+              <Descriptions.Item label="产地">{detail.coal_origin || '-'}</Descriptions.Item>
+              <Descriptions.Item label="合同量">{detail.contract_quantity.toLocaleString()} 吨</Descriptions.Item>
+              <Descriptions.Item label="累计交付">{detail.delivered_quantity.toLocaleString()} 吨</Descriptions.Item>
+              <Descriptions.Item label="单价">{detail.unit_price} 元/吨</Descriptions.Item>
+              <Descriptions.Item label="总金额">{detail.total_amount} 万元</Descriptions.Item>
+              <Descriptions.Item label="生效日期">{dayjs(detail.effective_date).format('YYYY-MM-DD')}</Descriptions.Item>
+              <Descriptions.Item label="到期日期">{dayjs(detail.expiry_date).format('YYYY-MM-DD')}</Descriptions.Item>
+              <Descriptions.Item label="基准热值">{detail.spec_calorific_value || '-'} kcal/kg</Descriptions.Item>
+              <Descriptions.Item label="灰分上限">{detail.spec_ash_max != null ? `${detail.spec_ash_max}%` : '-'}</Descriptions.Item>
+              <Descriptions.Item label="硫分上限">{detail.spec_sulfur_max != null ? `${detail.spec_sulfur_max}%` : '-'}</Descriptions.Item>
+              <Descriptions.Item label="水分上限">{detail.spec_moisture_max != null ? `${detail.spec_moisture_max}%` : '-'}</Descriptions.Item>
+              {detail.approved_by && (
+                <Descriptions.Item label="最终审批" span={2}>
+                  {detail.approved_by} 于 {dayjs(detail.approved_at).format('YYYY-MM-DD HH:mm')}
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+
+            {detail.approvals && detail.approvals.length > 0 && (
+              <Card
+                size="small"
+                title={`审批流（${detail.approvals.length} 级）`}
+                style={{ marginTop: 16 }}
+              >
+                <Steps
+                  size="small"
+                  current={detail.approvals.findIndex((a) => a.status === 'PENDING')}
+                  items={detail.approvals.map((a) => ({
+                    title: `第${a.level}级 · ${a.level_name}`,
+                    description: a.approved_at
+                      ? `${a.approver || ''} ${dayjs(a.approved_at).format('MM-DD HH:mm')}${a.notes ? ` - ${a.notes}` : ''}`
+                      : a.status === 'PENDING' ? '待审批' : '',
+                    status: approvalStepStatus(a.status),
+                  }))}
+                />
+              </Card>
             )}
-          </Descriptions>
+
+            {detail.price_history && detail.price_history.length > 0 && (
+              <Card
+                size="small"
+                title={`最近单价变更（${detail.price_history.length} 条）`}
+                style={{ marginTop: 16 }}
+                extra={<Button type="link" size="small" onClick={openHistory}>查看全部</Button>}
+              >
+                <Table<PriceHistoryItem>
+                  size="small"
+                  pagination={false}
+                  rowKey="id"
+                  dataSource={detail.price_history.slice(0, 3)}
+                  columns={[
+                    { title: '时间', dataIndex: 'created_at', width: 140, render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm') },
+                    { title: '原价', dataIndex: 'old_price', width: 100, render: (v: number) => `${v} 元/吨` },
+                    { title: '新价', dataIndex: 'new_price', width: 100, render: (v: number) => `${v} 元/吨` },
+                    { title: '变更人', dataIndex: 'changed_by', width: 100 },
+                    { title: '原因', dataIndex: 'reason', ellipsis: true },
+                  ]}
+                />
+              </Card>
+            )}
+          </>
         )}
       </Modal>
 
       {/* 审批 */}
       <Modal title="合同审批" open={approveOpen} onCancel={() => setApproveOpen(false)} onOk={() => approveForm.submit()}>
         <Form form={approveForm} layout="vertical" onFinish={handleApprove} initialValues={{ approved: true }}>
+          {detail && (
+            <div style={{ marginBottom: 12, padding: 8, background: '#fafafa', borderRadius: 4, fontSize: 13 }}>
+              当前级别：<b>
+                {detail.approvals.find((a) => a.status === 'PENDING')?.level_name || '-'}
+              </b>
+              （通过则推进到下一级，最后一级通过合同最终生效；拒绝则全链作废，合同退回草稿）
+            </div>
+          )}
           <Form.Item name="approver" label="审批人" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
           <Form.Item name="approved" label="结果" rules={[{ required: true }]}>
             <Select options={[
-              { value: true, label: '通过 - 合同生效' },
-              { value: false, label: '退回草稿' },
+              { value: true, label: '通过 - 推进到下一级 / 生效' },
+              { value: false, label: '拒绝 - 退回草稿' },
             ]} />
           </Form.Item>
           <Form.Item name="notes" label="意见">
@@ -329,6 +465,46 @@ export default function ContractList() {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 调价 */}
+      <Modal title="单价调整（写入审计历史）" open={priceOpen} onCancel={() => setPriceOpen(false)} onOk={() => priceForm.submit()}>
+        <Form form={priceForm} layout="vertical" onFinish={handleAdjustPrice}>
+          {detail && (
+            <div style={{ marginBottom: 12, color: '#666' }}>
+              当前单价：<b>{detail.unit_price} 元/吨</b>
+            </div>
+          )}
+          <Form.Item name="new_price" label="新单价（元/吨）" rules={[{ required: true }]}>
+            <InputNumber min={0} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="reason" label="变更原因" rules={[{ required: true }]}>
+            <Input.TextArea rows={3} placeholder="如：市场指导价上调、长协价季度调整" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 单价变更历史抽屉 */}
+      <Drawer
+        title="单价变更历史（全部）"
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        width={640}
+      >
+        {history.length === 0 ? (
+          <Empty description="暂无单价变更记录" />
+        ) : (
+          <Table<PriceHistoryItem>
+            rowKey="id" pagination={false} size="small"
+            dataSource={history}
+            columns={[
+              { title: '时间', dataIndex: 'created_at', render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm') },
+              { title: '原→新', render: (_, r) => `${r.old_price} → ${r.new_price} 元/吨` },
+              { title: '变更人', dataIndex: 'changed_by' },
+              { title: '原因', dataIndex: 'reason', ellipsis: true },
+            ]}
+          />
+        )}
+      </Drawer>
     </div>
   )
 }

@@ -2,12 +2,17 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   Card, Table, Tag, Button, Space, Modal, Form, Input, Select,
   DatePicker, message, Descriptions, Row, Col, InputNumber, Progress,
+  Tooltip, Empty,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { PlusOutlined, ReloadOutlined, EyeOutlined } from '@ant-design/icons'
+import {
+  PlusOutlined, ReloadOutlined, EyeOutlined,
+  DownloadOutlined, ExperimentOutlined,
+} from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { orderApi, contractApi } from '../api'
-import type { Order, OrderStatus, Contract } from '../types'
+import type { Order, OrderDetail, OrderStatus, Contract, QualityResult } from '../types'
+import { useAuthStore, canWrite, canApprove } from '../stores/auth'
 
 const STATUS_LABEL: Record<OrderStatus, { label: string; color: string }> = {
   PLANNED: { label: '计划中', color: 'default' },
@@ -19,6 +24,10 @@ const STATUS_LABEL: Record<OrderStatus, { label: string; color: string }> = {
 }
 
 export default function OrderList() {
+  const role = useAuthStore((s) => s.role)
+  const writable = canWrite(role)
+  const approvable = canApprove(role)
+
   const [data, setData] = useState<Order[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -26,13 +35,34 @@ export default function OrderList() {
   const [loading, setLoading] = useState(false)
   const [filters, setFilters] = useState<{ status?: OrderStatus }>({})
   const [createOpen, setCreateOpen] = useState(false)
-  const [detail, setDetail] = useState<Order | null>(null)
+  const [detail, setDetail] = useState<OrderDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [receiveOpen, setReceiveOpen] = useState(false)
   const [settleOpen, setSettleOpen] = useState(false)
   const [contracts, setContracts] = useState<Contract[]>([])
   const [form] = Form.useForm()
   const [receiveForm] = Form.useForm()
   const [settleForm] = Form.useForm()
+
+  const openDetail = async (row: Order) => {
+    setDetailLoading(true)
+    try {
+      const res = await orderApi.get(row.id)
+      setDetail(res.data)
+    } catch {
+      message.error('详情加载失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const handleExport = async () => {
+    try {
+      await orderApi.exportCsv(filters)
+    } catch (e: unknown) {
+      message.error((e as Error)?.message || '导出失败')
+    }
+  }
 
   const load = useCallback(async (p = page, ps = pageSize, f = filters) => {
     setLoading(true)
@@ -122,7 +152,7 @@ export default function OrderList() {
     },
     {
       title: '操作', width: 70,
-      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => setDetail(r)} />,
+      render: (_, r) => <Button type="link" icon={<EyeOutlined />} onClick={() => openDetail(r)} />,
     },
   ]
 
@@ -131,9 +161,18 @@ export default function OrderList() {
       <Card>
         <Row gutter={12} style={{ marginBottom: 16 }}>
           <Col>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-              新建订单
-            </Button>
+            <Space>
+              <Tooltip title={writable ? '' : '当前角色无创建权限'}>
+                <Button
+                  type="primary" icon={<PlusOutlined />}
+                  disabled={!writable}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  新建订单
+                </Button>
+              </Tooltip>
+              <Button icon={<DownloadOutlined />} onClick={handleExport}>CSV 导出</Button>
+            </Space>
           </Col>
           <Col flex="auto">
             <Space wrap>
@@ -213,23 +252,24 @@ export default function OrderList() {
         title={detail ? `订单详情 - ${detail.order_no}` : ''}
         open={!!detail}
         onCancel={() => setDetail(null)}
-        width={760}
+        width={820}
+        confirmLoading={detailLoading}
         footer={detail ? (
           <Space>
-            {detail.status === 'PLANNED' && (
+            {detail.status === 'PLANNED' && writable && (
               <Button type="primary" onClick={async () => {
                 await orderApi.dispatch(detail.id)
                 message.success('已发运')
                 setDetail(null); load()
               }}>确认发运</Button>
             )}
-            {['DISPATCHED', 'PARTIAL_RECEIVED'].includes(detail.status) && (
+            {['DISPATCHED', 'PARTIAL_RECEIVED'].includes(detail.status) && writable && (
               <Button type="primary" onClick={() => setReceiveOpen(true)}>登记到货</Button>
             )}
-            {detail.status === 'RECEIVED' && (
+            {detail.status === 'RECEIVED' && approvable && (
               <Button type="primary" onClick={() => setSettleOpen(true)}>结算</Button>
             )}
-            {['PLANNED', 'DISPATCHED'].includes(detail.status) && (
+            {['PLANNED', 'DISPATCHED'].includes(detail.status) && writable && (
               <Button danger onClick={async () => {
                 Modal.confirm({
                   title: '确认取消？',
@@ -271,6 +311,45 @@ export default function OrderList() {
               </Descriptions.Item>
             )}
           </Descriptions>
+        )}
+        {detail && (
+          <Card
+            size="small"
+            style={{ marginTop: 16 }}
+            title={
+              <span>
+                <ExperimentOutlined style={{ color: '#722ed1', marginRight: 6 }} />
+                煤质化验结果
+                <Tag color="purple" style={{ marginLeft: 8 }}>集成</Tag>
+              </span>
+            }
+          >
+            {detail.quality_results === null ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="未对接煤质化验系统（请配置 QUALITY_SYSTEM_URL）"
+              />
+            ) : detail.quality_results.length === 0 ? (
+              <Empty description="该订单暂无化验数据" />
+            ) : (
+              <Table<QualityResult>
+                size="small" pagination={false}
+                rowKey={(r) => String(r.sample_no || Math.random())}
+                dataSource={detail.quality_results}
+                columns={[
+                  { title: '样品号', dataIndex: 'sample_no', width: 120 },
+                  { title: '采样时间', dataIndex: 'sampled_at', width: 140,
+                    render: (v?: string) => v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-' },
+                  { title: '热值 kcal/kg', dataIndex: 'calorific_value', width: 110 },
+                  { title: '灰分 %', dataIndex: 'ash', width: 80 },
+                  { title: '硫分 %', dataIndex: 'sulfur', width: 80 },
+                  { title: '水分 %', dataIndex: 'moisture', width: 80 },
+                  { title: '结论', dataIndex: 'conclusion',
+                    render: (v?: string) => v ? <Tag color={v.includes('合格') ? 'green' : 'red'}>{v}</Tag> : '-' },
+                ]}
+              />
+            )}
+          </Card>
         )}
       </Modal>
 

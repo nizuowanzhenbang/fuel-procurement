@@ -6,9 +6,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_db, get_current_user
-from app.models.contract import FuelContract, ContractStatus
+from app.models.contract import FuelContract, ContractStatus, ContractType
 from app.models.order import PurchaseOrder, OrderStatus
 from app.models.supplier import Supplier, SupplierStatus
+from app.models.supplier_quality_score import SupplierQualityScore
 from app.models.user import User
 from app.utils.helpers import api_response
 
@@ -130,6 +131,97 @@ def price_trend(days: int = Query(90, ge=30, le=365), db: Session = Depends(get_
         {"date": v["date"], "avg_price": round(sum(v["prices"]) / len(v["prices"]), 2)}
         for v in daily.values()
     ], key=lambda x: x["date"]))
+
+
+@router.get("/supplier-quality-ranking")
+def supplier_quality_ranking(
+    limit: int = Query(10, ge=3, le=30),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """供应商质量综合评分排名（取每个供应商最新一条评分）"""
+    # 子查询：每个供应商最新评分时间
+    sub = (
+        db.query(
+            SupplierQualityScore.supplier_name,
+            func.max(SupplierQualityScore.evaluated_at).label("latest"),
+        )
+        .group_by(SupplierQualityScore.supplier_name)
+        .subquery()
+    )
+    rows = (
+        db.query(SupplierQualityScore)
+        .join(
+            sub,
+            (SupplierQualityScore.supplier_name == sub.c.supplier_name)
+            & (SupplierQualityScore.evaluated_at == sub.c.latest),
+        )
+        .order_by(SupplierQualityScore.score.desc())
+        .limit(limit)
+        .all()
+    )
+    # 关联供应商（取等级 / 信用分）
+    name_to_supplier = {
+        s.name: s for s in db.query(Supplier).filter(
+            Supplier.name.in_([r.supplier_name for r in rows])
+        ).all()
+    }
+    data = []
+    for idx, r in enumerate(rows, 1):
+        s = name_to_supplier.get(r.supplier_name)
+        data.append({
+            "rank": idx,
+            "supplier_name": r.supplier_name,
+            "score": round(r.score, 1),
+            "sample_count": r.sample_count,
+            "pass_rate": round(r.pass_rate, 1) if r.pass_rate is not None else None,
+            "evaluated_at": r.evaluated_at.isoformat(),
+            "tier": s.tier.value if s and s.tier else None,
+            "credit_score": s.credit_score if s else None,
+        })
+    return api_response(data=data)
+
+
+@router.get("/expiring-contracts")
+def expiring_contracts(
+    days: int = Query(30, ge=7, le=180),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """长协合同到期前 N 天提醒（默认 30 天）"""
+    now = datetime.utcnow()
+    deadline = now + timedelta(days=days)
+    rows = (
+        db.query(FuelContract)
+        .options(joinedload(FuelContract.supplier))
+        .filter(
+            FuelContract.status == ContractStatus.ACTIVE,
+            FuelContract.contract_type == ContractType.LONG_TERM,
+            FuelContract.expiry_date <= deadline,
+            FuelContract.expiry_date >= now,
+        )
+        .order_by(FuelContract.expiry_date)
+        .all()
+    )
+    data = []
+    for c in rows:
+        days_left = (c.expiry_date - now).days
+        remaining = (c.contract_quantity or 0) - (c.delivered_quantity or 0)
+        completion = (c.delivered_quantity or 0) / c.contract_quantity * 100 if c.contract_quantity else 0
+        data.append({
+            "id": c.id,
+            "contract_no": c.contract_no,
+            "supplier_name": c.supplier.name if c.supplier else None,
+            "coal_type": c.coal_type,
+            "expiry_date": c.expiry_date.isoformat(),
+            "days_left": days_left,
+            "contract_quantity": c.contract_quantity,
+            "delivered_quantity": c.delivered_quantity or 0,
+            "remaining_quantity": round(remaining, 1),
+            "completion_rate": round(completion, 1),
+            "unit_price": c.unit_price,
+        })
+    return api_response(data=data)
 
 
 @router.get("/coal-type-share")

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_current_user, require_write, require_approver
 from app.models.contract import FuelContract, ContractStatus
 from app.models.order import PurchaseOrder, OrderStatus
 from app.models.user import User
@@ -14,6 +14,8 @@ from app.schemas.order import (
     OrderCreate, OrderUpdate, OrderReceive, OrderSettle, OrderResponse,
 )
 from app.utils.helpers import api_response, paginate_response, generate_order_no
+from app.utils.csv_export import stream_csv, fmt_dt
+from app.utils.quality_client import fetch_order_quality_results
 
 router = APIRouter(prefix="/api/orders", tags=["采购订单"])
 
@@ -56,8 +58,46 @@ def list_orders(
     return api_response(data=paginate_response(items, total, page, page_size))
 
 
+@router.get("/export")
+def export_orders(
+    status: Optional[OrderStatus] = None,
+    contract_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    q = db.query(PurchaseOrder).options(
+        joinedload(PurchaseOrder.contract).joinedload(FuelContract.supplier)
+    )
+    if status:
+        q = q.filter(PurchaseOrder.status == status)
+    if contract_id:
+        q = q.filter(PurchaseOrder.contract_id == contract_id)
+    rows = q.order_by(PurchaseOrder.created_at.desc()).all()
+
+    headers = [
+        "订单编号", "合同编号", "供应商", "煤种", "计划量(吨)", "单价(元/吨)",
+        "计划金额(万元)", "到货量(吨)", "结算金额(万元)", "计划到货", "实际到货",
+        "运输方式", "状态", "结算人", "结算时间",
+    ]
+    data = []
+    for o in rows:
+        contract = o.contract
+        data.append([
+            o.order_no,
+            contract.contract_no if contract else "",
+            contract.supplier.name if contract and contract.supplier else "",
+            contract.coal_type if contract else "",
+            o.planned_quantity, o.unit_price, o.planned_amount,
+            o.delivered_quantity or 0, o.delivered_amount or 0,
+            fmt_dt(o.planned_delivery_date), fmt_dt(o.actual_delivery_date),
+            o.transport_mode or "", o.status.value if o.status else "",
+            o.settled_by or "", fmt_dt(o.settled_at),
+        ])
+    return stream_csv("订单列表", headers, data)
+
+
 @router.post("")
-def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def create_order(payload: OrderCreate, db: Session = Depends(get_db), _: User = Depends(require_write)):
     contract = db.query(FuelContract).filter(FuelContract.id == payload.contract_id).first()
     if not contract:
         raise HTTPException(404, "合同不存在")
@@ -101,13 +141,17 @@ def get_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(ge
     )
     if not o:
         raise HTTPException(404, "订单不存在")
-    return api_response(data=_enrich(o))
+    result = _enrich(o)
+    # 聚合调用煤质化验系统（失败降级 None）
+    quality = fetch_order_quality_results(o.order_no)
+    result["quality_results"] = quality  # None 表示未对接或无数据
+    return api_response(data=result)
 
 
 @router.put("/{order_id}")
 def update_order(
     order_id: int, payload: OrderUpdate,
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(require_write),
 ):
     o = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not o:
@@ -124,7 +168,7 @@ def update_order(
 
 
 @router.post("/{order_id}/dispatch")
-def dispatch_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def dispatch_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_write)):
     o = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not o:
         raise HTTPException(404, "订单不存在")
@@ -138,7 +182,7 @@ def dispatch_order(order_id: int, db: Session = Depends(get_db), _: User = Depen
 @router.post("/{order_id}/receive")
 def receive_order(
     order_id: int, payload: OrderReceive,
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(require_write),
 ):
     """到货登记，支持部分到货"""
     o = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
@@ -178,7 +222,7 @@ def receive_order(
 @router.post("/{order_id}/settle")
 def settle_order(
     order_id: int, payload: OrderSettle,
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(require_approver),
 ):
     """结算订单"""
     o = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
@@ -201,7 +245,7 @@ def settle_order(
 
 
 @router.post("/{order_id}/cancel")
-def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def cancel_order(order_id: int, db: Session = Depends(get_db), _: User = Depends(require_write)):
     o = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not o:
         raise HTTPException(404, "订单不存在")

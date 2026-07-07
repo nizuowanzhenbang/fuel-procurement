@@ -68,3 +68,15 @@ class FuelContract(Base):
 
     supplier = relationship("Supplier", back_populates="contracts")
     orders = relationship("PurchaseOrder", back_populates="contract", cascade="all, delete-orphan")
+    approvals = relationship(
+        "ContractApproval",
+        back_populates="contract",
+        cascade="all, delete-orphan",
+        order_by="ContractApproval.level",
+    )
+    price_history = relationship(
+        "ContractPriceHistory",
+        back_populates="contract",
+        cascade="all, delete-orphan",
+        order_by="ContractPriceHistory.created_at.desc()",
+    )

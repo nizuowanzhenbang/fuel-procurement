@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     # 闭环集成：煤质化验系统（查询供应商信用分）
     QUALITY_SYSTEM_URL: str = ""
     QUALITY_INTEGRATION_SECRET: str = "coal-integration-shared-secret"
+    # 闭环集成：煤场库存系统（接收入煤场通知 / 提供订单查询）
+    INTEGRATION_SECRET: str = "coal-integration-shared-secret"
 
     model_config = {"env_file": ".env", "case_sensitive": True}
 

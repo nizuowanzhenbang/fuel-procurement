@@ -7,6 +7,7 @@ from app.models.user import User, UserRole
 from app.models.supplier import Supplier, SupplierStatus, SupplierTier
 from app.models.contract import FuelContract, ContractType, PricingMode, ContractStatus
 from app.models.order import PurchaseOrder, OrderStatus
+from app.models.supplier_quality_score import SupplierQualityScore
 from app.api.deps import hash_password
 from app.utils.helpers import (
     generate_supplier_code,
@@ -34,16 +35,23 @@ def seed():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        # admin
-        if not db.query(User).filter(User.username == "admin").first():
-            db.add(User(
-                username="admin",
-                hashed_password=hash_password("admin123"),
-                role=UserRole.ADMIN,
-                is_active=True,
-            ))
-            db.commit()
-            print("✓ admin 已创建")
+        # 角色账户：admin / 采购员 / 审批人 / 查看者
+        default_users = [
+            ("admin",      "admin123", UserRole.ADMIN),
+            ("buyer",      "buyer123", UserRole.PROCUREMENT),
+            ("approver",   "approver123", UserRole.APPROVER),
+            ("viewer",     "viewer123", UserRole.VIEWER),
+        ]
+        for username, pwd, role in default_users:
+            if not db.query(User).filter(User.username == username).first():
+                db.add(User(
+                    username=username,
+                    hashed_password=hash_password(pwd),
+                    role=role,
+                    is_active=True,
+                ))
+        db.commit()
+        print("✓ 默认账户已就绪：admin/buyer/approver/viewer")
 
         # 供应商
         if db.query(Supplier).count() == 0:
@@ -190,6 +198,23 @@ def seed():
                 contract.delivered_quantity = round(float(delivered), 1)
             db.commit()
             print(f"✓ 已生成 {seq - 1} 个订单")
+
+        # 模拟煤质系统推送的质量评分（v2 集成演示）
+        if db.query(SupplierQualityScore).count() == 0:
+            now = datetime.utcnow()
+            for s in db.query(Supplier).filter(Supplier.status == SupplierStatus.ACTIVE).all():
+                # 每个供应商 3 条历史评分
+                for k in range(3):
+                    db.add(SupplierQualityScore(
+                        supplier_name=s.name,
+                        score=round(random.uniform(78, 96), 1),
+                        sample_count=random.randint(8, 30),
+                        pass_rate=round(random.uniform(85, 99), 1),
+                        evaluated_at=now - timedelta(days=k * 30 + random.randint(0, 5)),
+                        notes="煤质化验系统月度综合评分",
+                    ))
+            db.commit()
+            print("✓ 已生成质量评分演示数据")
     finally:
         db.close()
 

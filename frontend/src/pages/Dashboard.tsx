@@ -1,15 +1,18 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Row, Col, Card, Statistic } from 'antd'
+import { Row, Col, Card, Statistic, Table, Tag, Progress, Empty, Tooltip } from 'antd'
 import {
   TeamOutlined, FileTextOutlined, ShoppingCartOutlined,
-  DollarOutlined, RiseOutlined,
+  DollarOutlined, RiseOutlined, TrophyOutlined, ClockCircleOutlined,
 } from '@ant-design/icons'
 import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
+import type { ColumnsType } from 'antd/es/table'
+import dayjs from 'dayjs'
 import { dashboardApi } from '../api'
 import type {
   OverviewData, MonthlyQuantityItem, SupplierShareItem,
   PriceTrendItem, CoalTypeShareItem,
+  SupplierQualityRank, ExpiringContract,
 } from '../types'
 
 export default function Dashboard() {
@@ -18,22 +21,28 @@ export default function Dashboard() {
   const [supplierShare, setSupplierShare] = useState<SupplierShareItem[]>([])
   const [priceTrend, setPriceTrend] = useState<PriceTrendItem[]>([])
   const [coalShare, setCoalShare] = useState<CoalTypeShareItem[]>([])
+  const [qualityRank, setQualityRank] = useState<SupplierQualityRank[]>([])
+  const [expiring, setExpiring] = useState<ExpiringContract[]>([])
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
-      const [ov, mq, ss, pt, cs] = await Promise.all([
+      const [ov, mq, ss, pt, cs, qr, ec] = await Promise.all([
         dashboardApi.overview(),
         dashboardApi.monthlyQuantity(6),
         dashboardApi.supplierShare(),
         dashboardApi.priceTrend(90),
         dashboardApi.coalTypeShare(),
+        dashboardApi.supplierQualityRanking(10),
+        dashboardApi.expiringContracts(30),
       ])
       setOverview(ov.data)
       setMonthly(mq.data)
       setSupplierShare(ss.data)
       setPriceTrend(pt.data)
       setCoalShare(cs.data)
+      setQualityRank(qr.data)
+      setExpiring(ec.data)
     } finally {
       setLoading(false)
     }
@@ -89,6 +98,62 @@ export default function Dashboard() {
       data: coalShare.map((c) => ({ name: c.coal_type, value: c.quantity })),
     }],
   }
+
+  const rankColumns: ColumnsType<SupplierQualityRank> = [
+    {
+      title: '排名', dataIndex: 'rank', width: 60, align: 'center',
+      render: (v: number) => {
+        const colors = ['#f59f00', '#adb5bd', '#cd7f32']
+        return v <= 3
+          ? <Tag color={colors[v - 1]} style={{ fontWeight: 600 }}>NO.{v}</Tag>
+          : v
+      },
+    },
+    { title: '供应商', dataIndex: 'supplier_name', ellipsis: true },
+    {
+      title: '质量评分', dataIndex: 'score', width: 130,
+      render: (v: number) => (
+        <Progress
+          percent={v} size="small"
+          strokeColor={v >= 90 ? '#52c41a' : v >= 80 ? '#1677ff' : '#faad14'}
+          format={(p) => `${p?.toFixed?.(1) ?? p}`}
+        />
+      ),
+    },
+    {
+      title: '合格率', dataIndex: 'pass_rate', width: 80,
+      render: (v: number | null) => v != null ? `${v}%` : '-',
+    },
+    { title: '样本', dataIndex: 'sample_count', width: 60 },
+    {
+      title: '评估时间', dataIndex: 'evaluated_at', width: 100,
+      render: (v: string) => dayjs(v).format('MM-DD'),
+    },
+  ]
+
+  const expiringColumns: ColumnsType<ExpiringContract> = [
+    { title: '合同号', dataIndex: 'contract_no', width: 150 },
+    { title: '供应商', dataIndex: 'supplier_name', ellipsis: true },
+    { title: '煤种', dataIndex: 'coal_type', width: 80 },
+    {
+      title: '到期', dataIndex: 'expiry_date', width: 100,
+      render: (v: string) => dayjs(v).format('YYYY-MM-DD'),
+    },
+    {
+      title: '剩余', dataIndex: 'days_left', width: 80, align: 'center',
+      render: (v: number) => (
+        <Tag color={v <= 7 ? 'red' : v <= 15 ? 'orange' : 'gold'}>{v} 天</Tag>
+      ),
+    },
+    {
+      title: '履约进度', dataIndex: 'completion_rate', width: 130,
+      render: (v: number) => <Progress percent={v} size="small" />,
+    },
+    {
+      title: '剩余量', dataIndex: 'remaining_quantity', width: 90,
+      render: (v: number) => `${v.toLocaleString()} 吨`,
+    },
+  ]
 
   return (
     <div>
@@ -155,7 +220,7 @@ export default function Dashboard() {
         </Col>
       </Row>
 
-      <Row gutter={[16, 16]}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         <Col xs={24} lg={14}>
           <Card
             title="单价趋势（近90天）"
@@ -175,6 +240,57 @@ export default function Dashboard() {
         <Col xs={24} lg={10}>
           <Card title="煤种采购占比" loading={loading}>
             <ReactECharts option={coalOption} style={{ height: 280 }} notMerge />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* v2: 集成与预警 */}
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <Card
+            title={
+              <span>
+                <TrophyOutlined style={{ color: '#fa8c16', marginRight: 8 }} />
+                供应商质量综合评分排名
+                <Tooltip title="数据来源：煤质化验系统（coal-quality-monitor）webhook 推送">
+                  <Tag color="purple" style={{ marginLeft: 8, fontWeight: 'normal' }}>集成</Tag>
+                </Tooltip>
+              </span>
+            }
+            loading={loading}
+          >
+            {qualityRank.length > 0 ? (
+              <Table<SupplierQualityRank>
+                dataSource={qualityRank} columns={rankColumns} rowKey="rank"
+                pagination={false} size="small"
+              />
+            ) : (
+              <Empty description="尚未接收质量评分（等待煤质系统推送）" />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card
+            title={
+              <span>
+                <ClockCircleOutlined style={{ color: '#fa541c', marginRight: 8 }} />
+                长协合同到期提醒（30天内）
+                <Tag color={expiring.length > 0 ? 'red' : 'green'} style={{ marginLeft: 8 }}>
+                  {expiring.length} 份
+                </Tag>
+              </span>
+            }
+            loading={loading}
+          >
+            {expiring.length > 0 ? (
+              <Table<ExpiringContract>
+                dataSource={expiring} columns={expiringColumns} rowKey="id"
+                pagination={false} size="small"
+                scroll={{ x: 700 }}
+              />
+            ) : (
+              <Empty description="30 天内无长协合同到期" />
+            )}
           </Card>
         </Col>
       </Row>
